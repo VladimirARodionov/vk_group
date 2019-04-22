@@ -3,7 +3,8 @@ import sys
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from settings import token, group_id, api_v, max_workers, delay, deep
+from settings import token, group_id, api_v, max_workers, delay, deep, blacklist, group_uid
+
 
 def force(f, delay=delay):
 	"""При неудачном запросе сделать паузу и попробовать снова"""
@@ -126,7 +127,7 @@ class VkFriends():
 		return result
 
 
-	def common_friends(self):
+	def common_friends(self, userlist):
 		"""
 		read https://vk.com/dev/friends.getMutual and read https://vk.com/dev/execute
 		Возвращает в словаре кортежи с инфой о цели и списком общих друзей с инфой
@@ -139,17 +140,20 @@ class VkFriends():
 					target_uids = i
 					if j in target_uids:
 						target_uids.remove(j)
+					for bl in blacklist:
+						if str(bl) in target_uids:
+							target_uids.remove(str(bl))
+							print('Removed blacklisted id: ' + str(bl))
 					resp = requests.get(self.request_url('friends.getMutual',
 														 'source_uid=%(source)s&target_uids=%(target)s' % {
 															 'source': j,
 															 'target': VkFriends.make_targets(target_uids)},
 														 access_token=True)).json()
-					time.sleep(delay)
 					if resp.get('error'):
 						print(resp.get('error'))
 						time.sleep(delay)
 					else:
-						r=resp['response']
+						return resp['response']
 						break
 				except Exception as e:
 					print(str(e))
@@ -159,16 +163,32 @@ class VkFriends():
 			with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
 				for x, id in enumerate(index):
 					try:
-						result.append((self.all_friends[int(id)], [self.all_friends[int(i)] for i in r[x]] if r[x] else None))
+						result.append([id, r['common_friends']])
 					except:
 						pass
 
-		# разбиваем список на части - по 25 в каждой
-		for j in self.all_friends:
+		for bl in blacklist:
+			if str(bl) in userlist:
+				userlist.remove(str(bl))
+				print('Removed blacklisted id: ' + str(bl))
+		with open('common_friends.txt', encoding='utf-8') as f:
+			lines = f.read().splitlines()
+		f.close()
+		for l in lines:
+			if str(l) in userlist:
+				userlist.remove(str(l))
+		for j in userlist:
 			print('j=' + str(j))
-			for i in VkFriends.parts(list(self.all_friends)):
+			for i in VkFriends.parts(list(userlist)):
 				print('i=' + str(i))
-				fill_result(i, worker(i, j))
+				worker_result = worker(i, j)
+				result.append([j, worker_result[0]['common_friends']])
+			#save to file
+			with open('common_friends.txt', 'a', encoding='utf-8') as f:
+				if not result:
+					f.write("%s\n" % str(j))
+				for item in result:
+					f.write("%s;%s\n" % (str(j), item))
 
 		return result
 
@@ -235,6 +255,40 @@ class VkFriends():
 		with open(filename+'.json',"w", encoding='utf-8') as f:
 			f.write(json)
 
+	def find_blacklist(self, userlist):
+		for bl in list(userlist):
+			print('bl=' + str(bl))
+			while True:
+				resp = requests.get(self.request_url('friends.getMutual',
+												  'source_uid=%(source)s&target_uid=%(target)s' % {
+													  'source': userlist[0],
+													  'target': bl},
+												  access_token=True)).json()
+				if resp.get('error'):
+					print(resp.get('error'))
+					if (resp.get('error').get('error_code') == '15'):
+						print('Added to blacklist from ' + bl)
+				else:
+					break
+
+
+	def remove_from_group(self, userlist):
+		for bl in list(userlist):
+			print('bl=' + str(bl))
+			while True:
+				resp = requests.get(self.request_url('groups.removeUser',
+												  'group_id=%(group)s&user_id=%(target)s' % {
+													  'group': group_uid,
+													  'target': bl},
+												  access_token=True)).json()
+				if resp.get('error'):
+					print(resp.get('error'))
+				else:
+					print(resp.get('response'))
+					break
+
+
+
 if __name__ == '__main__':
 	a = VkFriends(token, group_id, api_v, max_workers)
 
@@ -247,6 +301,7 @@ if __name__ == '__main__':
 	banned_users_ids = []
 	city = []
 	users_csv = []
+	user_ids = []
 	for user in all_users:
 		if user.get('city'):
 			city.append({'city_id': user.get('city').get('id'), 'city_name': user.get('city').get('title') if user.get('city').get('title') else None})
@@ -254,6 +309,8 @@ if __name__ == '__main__':
 			banned_users_ids.append(user.get('id'))
 		else:
 			users_csv.append(str(user.get('id')) + ';' + user.get('first_name') + ';' + user.get('last_name')+ ';' + (user.get('city').get('title') if user.get('city') else ''))
+			if not user.get('is_closed'):
+				user_ids.append(user.get('id'))
 
 	with open('banned_users_ids.txt', 'w', encoding='utf-8') as f:
 		for item in banned_users_ids:
@@ -265,8 +322,16 @@ if __name__ == '__main__':
 		for item in users_csv:
 			f.write("%s\n" % item)
 
+	with open('public_users.txt', 'w', encoding='utf-8') as f:
+		for item in user_ids:
+			f.write("%s\n" % item)
+
+	#banned_users_ids.remove(1773012)
+	#banned_users_ids.remove(101658562)
+	#a.remove_from_group(banned_users_ids)
+
 	# print(a.my_name, a.my_last_name, a.my_id, a.photo)
-	#a.common_friends()
+	#cf = a.common_friends(user_ids)
 	#df = a.deep_friends(deep)
 	#print(df)
 	#VkFriends.save_load_deep_friends('deep_friends_dct', True, df)
